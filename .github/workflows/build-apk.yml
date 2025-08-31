@@ -4,50 +4,51 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - 'v*'
+      - 'v*'   # if you push a tag like v6.1, it will attach the APK to that release
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    # Keep the job containerized (meets “containerization” intent)
     container: ubuntu:22.04
 
     env:
-      ANDROID_SDK_ROOT: /opt/android-sdk
-      ANDROID_HOME: /opt/android-sdk
+      # Set the API level you want to install. If your build.gradle uses 36, keep 36 here.
+      # If install fails later with "package not found", temporarily set this to 35
+      # AND change compileSdk/targetSdk in build.gradle to 35 to match.
+      ANDROID_API_LEVEL: "36"
+      ANDROID_BUILD_TOOLS: "36.0.0"
 
     steps:
-      - name: Install basics
+      - name: Install base packages
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            wget unzip git ca-certificates openssl tzdata \
-            openjdk-11-jdk
-          java -version
+            git unzip ca-certificates wget tzdata
 
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare Android SDK (command-line tools)
-        run: |
-          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
-          unzip -q /tmp/cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
-          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
-          rm /tmp/cmdline-tools.zip
-          # Make tools visible to later steps (no "export" here)
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
-          echo "PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH" >> $GITHUB_ENV
+      # AGP 8.x needs Java 17 to RUN the build (your source compatibility can still be Java 11)
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      - name: Install Android platforms & build-tools
+      # Installs cmdline-tools and configures ANDROID_HOME / ANDROID_SDK_ROOT
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept licenses & install SDK packages
         run: |
-          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses
-          # If these fail because API 36 isn't published on your runner yet,
-          # temporarily switch to android-35 and build-tools;35.0.0
-          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
+          yes | sdkmanager --licenses
+          echo "Installing platform-tools, platforms;android-${ANDROID_API_LEVEL}, build-tools;${ANDROID_BUILD_TOOLS}"
+          sdkmanager \
             "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -62,16 +63,24 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
+      # Helpful diagnostics
+      - name: Show versions
+        run: |
+          java -version
+          ./gradlew --version || true
+          sdkmanager --list | head -n 200 || true
+
       - name: Build release APK
         run: ./gradlew --no-daemon assembleRelease
 
-      - name: Upload APK as workflow artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release.apk
           path: app/build/outputs/apk/release/app-release.apk
 
-      - name: Attach APK to GitHub Release (only when tagging)
+      # Only runs on tag builds; won’t fail normal branch builds
+      - name: Attach APK to GitHub Release (when tagging)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
