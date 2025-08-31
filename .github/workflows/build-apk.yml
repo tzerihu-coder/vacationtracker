@@ -1,0 +1,80 @@
+name: Containerized Build (APK)
+
+on:
+  workflow_dispatch:  # lets you run it manually from the Actions tab
+  push:
+    tags:
+      - 'v*'          # if you push a tag like v6.1, it will also attach the APK to that release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # >>> This line makes the job run INSIDE a Docker container (containerization!)
+    container: ubuntu:22.04
+
+    steps:
+      - name: Install basics
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            wget unzip git ca-certificates openssl tzdata \
+            openjdk-11-jdk
+          java -version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Android SDK (command-line tools)
+        env:
+          ANDROID_SDK_ROOT: /opt/android-sdk
+        run: |
+          set -e
+          mkdir -p /opt/android-sdk/cmdline-tools
+          cd /opt/android-sdk
+          # Get latest command-line tools (update this URL if Google changes it)
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d /opt/android-sdk/cmdline-tools
+          mv /opt/android-sdk/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest
+          rm /tmp/cmdline-tools.zip
+          echo "export ANDROID_SDK_ROOT=/opt/android-sdk" >> $GITHUB_ENV
+          echo "export ANDROID_HOME=/opt/android-sdk" >> $GITHUB_ENV
+          echo "export PATH=$PATH:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools" >> $GITHUB_ENV
+
+      - name: Install Android platforms & build-tools
+        env:
+          ANDROID_SDK_ROOT: /opt/android-sdk
+          ANDROID_HOME: /opt/android-sdk
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" \
+                     "platforms;android-36" \
+                     "build-tools;36.0.0"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make Gradle wrapper executable (just in case)
+        run: chmod +x ./gradlew
+
+      - name: Build release APK (unsigned unless you configured signingConfigs)
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release.apk
+          path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Attach APK to GitHub Release (only when tagging)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/app-release.apk
